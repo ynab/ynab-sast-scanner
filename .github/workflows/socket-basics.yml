@@ -1,0 +1,127 @@
+name: Socket Basics Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      suppressions-ref:
+        description: Ref to read suppression configs from. Defaults to their default branch.
+        required: false
+        type: string
+        default: ""
+    secrets:
+      SOCKET_SECURITY_API_KEY:
+        required: true
+      SAST_SUPPRESSIONS_APP_PRIVATE_KEY:
+        description: >
+          Private key for the GitHub App that can read ynab-sast-scanner-suppressions.
+          The App id is not a secret and is set below.
+        required: true
+
+concurrency:
+  group: socket-basics-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # App ids are not secrets. Only the private key is.
+  SAST_SUPPRESSIONS_APP_ID: "4706264"
+
+jobs:
+  security-scan:
+    permissions:
+      issues: write
+      contents: read
+      pull-requests: write
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - name: Reject non-pull_request callers
+        if: github.event_name != 'pull_request'
+        env:
+          CALLER_EVENT: ${{ github.event_name }}
+          CALLER_REPO: ${{ github.repository }}
+        run: |
+          echo "::error::Socket Basics was called on '${CALLER_EVENT}' by ${CALLER_REPO}, but this reusable workflow only supports 'pull_request'."
+          echo "::error::Its concurrency group cancels superseded runs, which on a non-pull_request event can discard the scan record for a commit that shipped."
+          echo "::error::To support '${CALLER_EVENT}', scope the concurrency group by event or drop cancel-in-progress in ynab/ynab-sast-scanner/.github/workflows/socket-basics.yml, then relax this check."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Mints a short-lived installation token scoped to the one private repo holding our
+      # suppression configs. Deliberately an App rather than a PAT: it expires on its own,
+      # is scoped to a single repo, and has no human owner to offboard.
+      - name: Mint a token for the suppressions repo
+        id: suppressions-token
+        uses: actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b # v2.1.4
+        with:
+          app-id: ${{ env.SAST_SUPPRESSIONS_APP_ID }}
+          private-key: ${{ secrets.SAST_SUPPRESSIONS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ynab-sast-scanner-suppressions
+
+      - name: Fetch and merge suppression config
+        id: config
+        uses: ynab/ynab-sast-scanner/.github/actions/merge-socket-config@04fdc1c6dcf163ce3639f879b95487bc064c0210
+        with:
+          suppressions-token: ${{ steps.suppressions-token.outputs.token }}
+          suppressions-ref: ${{ inputs.suppressions-ref }}
+          target-repo: ${{ github.repository }}
+
+      - name: Run Socket Basics
+        env:
+          # Bump this digest when upgrading socket-basics. Currently v3.0.0 - https://github.com/SocketDev/socket-basics/pkgs/container/socket-basics.
+          SOCKET_BASICS_IMAGE: ghcr.io/socketdev/socket-basics@sha256:93ce10202376b57ec5ed428d55337d4edd62ae2653434ac38301b55f6d230975
+          GITHUB_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_SECURITY_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          MERGED_CONFIG: ${{ steps.config.outputs.config-path }}
+        run: |
+          # A leftover facts file must never masquerade as this scan's results.
+          rm -f "${GITHUB_WORKSPACE}/.socket.facts.json"
+
+          # The merged config lives in RUNNER_TEMP, which is mounted below, so the
+          # suppression list never enters the scanned workspace.
+          config_in_container="/github/runner_temp/${MERGED_CONFIG#$RUNNER_TEMP/}"
+
+          docker run --rm \
+            -e INPUT_SOCKET_ORG="ynab" \
+            -e INPUT_SOCKET_SECURITY_API_KEY="$SOCKET_SECURITY_API_KEY" \
+            -e GITHUB_TOKEN \
+            -e GITHUB_PR_NUMBER \
+            -e GITHUB_REPOSITORY \
+            -e GITHUB_REPOSITORY_OWNER \
+            -e GITHUB_SHA \
+            -e GITHUB_REF \
+            -e GITHUB_REF_NAME \
+            -e GITHUB_HEAD_REF \
+            -e GITHUB_BASE_REF \
+            -e GITHUB_EVENT_NAME \
+            -e GITHUB_WORKSPACE=/github/workspace \
+            -e GITHUB_RUN_ID \
+            -e GITHUB_RUN_NUMBER \
+            -e GITHUB_ACTIONS \
+            -e CI \
+            -v "${GITHUB_WORKSPACE}:/github/workspace" \
+            -v "${RUNNER_TEMP}:/github/runner_temp" \
+            -v "${RUNNER_TEMP}/_github_home:/github/home" \
+            -v "${RUNNER_TEMP}/_github_workflow:/github/workflow" \
+            -v "${RUNNER_TEMP}/_runner_file_commands:/github/file_commands" \
+            -w /github/workspace \
+            "$SOCKET_BASICS_IMAGE" \
+            --config "$config_in_container"
+
+      - name: Verify the scan produced results
+        # The scan step's exit code covers findings and crashes, but not a clean exit that
+        # wrote nothing — an empty scan would otherwise read as a pass. This inherits the
+        # default success() condition on purpose: a non-zero scan step has already failed
+        # the job, and a cancelled run (see the concurrency group above) has no results to
+        # check.
+        run: |
+          if [[ ! -f "${GITHUB_WORKSPACE}/.socket.facts.json" ]]; then
+            echo "::error::Socket Basics exited successfully but wrote no .socket.facts.json — failing the job instead of reporting a false pass."
+            exit 1
+          fi
+          echo "Socket Basics wrote .socket.facts.json ($(wc -c < "${GITHUB_WORKSPACE}/.socket.facts.json") bytes)."
