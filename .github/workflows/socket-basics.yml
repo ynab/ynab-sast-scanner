@@ -64,9 +64,7 @@ jobs:
 
       - name: Fetch and merge suppression config
         id: config
-        # TEMPORARY: currently a commit on this branch, so ynab/test-actions can exercise
-        # the workflow before any of it reaches main.
-        uses: ynab/ynab-sast-scanner/.github/actions/merge-socket-config@04fdc1c6dcf163ce3639f879b95487bc064c0210 # TO-DO: Bump SHA to merge commit before merging
+        uses: ynab/ynab-sast-scanner/.github/actions/merge-socket-config@04fdc1c6dcf163ce3639f879b95487bc064c0210
         with:
           suppressions-token: ${{ steps.suppressions-token.outputs.token }}
           suppressions-ref: ${{ inputs.suppressions-ref }}
