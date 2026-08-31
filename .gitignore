@@ -1,0 +1,3 @@
+# Scan artifacts. These contain code snippets from whatever was scanned, and this
+# repo is public — they must never be committed.
+.socket-scans/

@@ -1,0 +1,80 @@
+name: Fetch and merge Socket suppression config
+description: >
+  Fetches the org-level and repo-level Socket Basics suppression configs from the private
+  ynab-sast-scanner-suppressions repo and merges them into a single config file for
+  socket-basics --config.
+
+inputs:
+  suppressions-token:
+    description: >
+      GitHub App installation token with contents:read on the suppressions repo.
+    required: true
+  suppressions-repo:
+    description: Repository holding the suppression configs.
+    required: false
+    default: ynab/ynab-sast-scanner-suppressions
+  suppressions-ref:
+    description: >
+      Ref to read the configs from. Defaults to the default branch, so a suppression PR
+      takes effect on merge without a second PR here. Pin to a SHA if you would rather
+      changes be deliberate.
+    required: false
+    default: ""
+  target-repo:
+    description: 'Repo being scanned, as owner/name. Selects suppressions/<name>.json.'
+    required: true
+
+outputs:
+  config-path:
+    description: Absolute path to the merged config file.
+    value: ${{ steps.merge.outputs.config-path }}
+
+runs:
+  using: composite
+  steps:
+    - id: fetch
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.suppressions-token }}
+        SUPPRESSIONS_REPO: ${{ inputs.suppressions-repo }}
+        SUPPRESSIONS_REF: ${{ inputs.suppressions-ref }}
+        TARGET_REPO: ${{ inputs.target-repo }}
+      run: |
+        set -euo pipefail
+        dir="${RUNNER_TEMP}/socket-suppressions"
+        mkdir -p "$dir"
+
+        ref_qs=""
+        if [[ -n "$SUPPRESSIONS_REF" ]]; then
+          ref_qs="?ref=${SUPPRESSIONS_REF}"
+        fi
+
+        # Fetch the two files by API rather than checking the repo out. actions/checkout
+        # can only write inside the workspace, and the workspace is the scan target — a
+        # private config checked out there would land in the scanned tree.
+        if ! gh api "repos/${SUPPRESSIONS_REPO}/contents/org.json${ref_qs}" \
+              --jq '.content' | base64 -d > "$dir/org.json"; then
+          echo "::error::Could not read org.json from ${SUPPRESSIONS_REPO}. Check that the" \
+               "GitHub App is installed on that repo with contents:read, and that its" \
+               "installation token reached this workflow."
+          exit 1
+        fi
+
+        repo_name="${TARGET_REPO##*/}"
+        if gh api "repos/${SUPPRESSIONS_REPO}/contents/suppressions/${repo_name}.json${ref_qs}" \
+             --jq '.content' 2>/dev/null | base64 -d > "$dir/repo.json"; then
+          echo "Repo-level suppressions found for ${repo_name}."
+        else
+          rm -f "$dir/repo.json"
+          echo "No repo-level suppressions for ${repo_name}; using org config only."
+        fi
+
+    - id: merge
+      shell: bash
+      run: |
+        set -euo pipefail
+        dir="${RUNNER_TEMP}/socket-suppressions"
+        out="${dir}/merged.json"
+        python3 "${{ github.action_path }}/merge_config.py" \
+          "$dir/org.json" "$dir/repo.json" "$out"
+        echo "config-path=$out" >> "$GITHUB_OUTPUT"
