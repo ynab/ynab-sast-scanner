@@ -79,6 +79,11 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           MERGED_CONFIG: ${{ steps.config.outputs.config-path }}
         run: |
+          # Needed because of the redaction pipe below: without it, a failing docker run
+          # would be masked by sed's own (near-guaranteed) success, and the job would pass
+          # on a scan that actually crashed.
+          set -o pipefail
+
           # A leftover facts file must never masquerade as this scan's results.
           rm -f "${GITHUB_WORKSPACE}/.socket.facts.json"
 
@@ -86,6 +91,9 @@ jobs:
           # suppression list never enters the scanned workspace.
           config_in_container="/github/runner_temp/${MERGED_CONFIG#$RUNNER_TEMP/}"
 
+          # socket-basics logs its exact opengrep invocation at INFO, including every
+          # --exclude-rule — to avoid leaking suppressions in the 
+          # terminal, we redact it on the way out
           docker run --rm \
             -e INPUT_SOCKET_ORG="ynab" \
             -e INPUT_SOCKET_SECURITY_API_KEY="$SOCKET_SECURITY_API_KEY" \
@@ -111,7 +119,8 @@ jobs:
             -v "${RUNNER_TEMP}/_runner_file_commands:/github/file_commands" \
             -w /github/workspace \
             "$SOCKET_BASICS_IMAGE" \
-            --config "$config_in_container"
+            --config "$config_in_container" \
+            2>&1 | sed -E 's/(--exclude-rule [^ ]+ ?)+/[suppressed rules redacted] /g'
 
       - name: Verify the scan produced results
         # The scan step's exit code covers findings and crashes, but not a clean exit that

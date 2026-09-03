@@ -80,6 +80,16 @@ def clean_path(raw, workspace):
     return raw
 
 
+# socket-basics logs its exact opengrep invocation at INFO, including every
+# --exclude-rule it was told to skip — to avoid leaking suppressions in the 
+# terminal, we redact it on the way out
+_EXCLUDE_RULE_RUN = re.compile(r"(?:--exclude-rule \S+ ?)+")
+
+
+def redact_suppressed_rules(line: str) -> str:
+    return _EXCLUDE_RULE_RUN.sub("[suppressed rules redacted] ", line)
+
+
 # --- Pre-flight ---
 
 api_key = os.environ.get("SOCKET_SECURITY_API_KEY")
@@ -273,8 +283,13 @@ try:
         "--branch", commit_sha,
     ]
 
-    result = subprocess.run(cmd, env=env)
-    socket_basics_returncode = result.returncode
+    process = subprocess.Popen(
+        cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+    )
+    for line in process.stdout:
+        print(redact_suppressed_rules(line), end="")
+    process.wait()
+    socket_basics_returncode = process.returncode
 finally:
     config_path.unlink(missing_ok=True)
     shutil.rmtree(suppressions_dir, ignore_errors=True)
