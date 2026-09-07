@@ -30,6 +30,12 @@ env:
 
 jobs:
   security-scan:
+    # Dependabot-authored PRs get no repository or organization secrets on the pull_request
+    # event — a GitHub platform restriction, not something configurable on our end. Without
+    # secrets, minting the suppressions-repo token fails outright, so skip the job rather
+    # than fail it: a version bump doesn't introduce new first-party code, so the coverage
+    # gap is low-risk.
+    if: github.actor != 'dependabot[bot]'
     permissions:
       issues: write
       contents: read
