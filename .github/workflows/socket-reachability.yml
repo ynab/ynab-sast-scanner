@@ -50,6 +50,15 @@ on:
         required: false
         type: number
         default: 45
+      setup-command:
+        description: >
+          Optional shell command run from the repo root before the scan, e.g. `yarn install --immutable` plus any
+          build step that workspace packages need. Use it when the analysis can't install a project on its own,
+          typically workspace packages that only resolve after the whole monorepo is installed (and built).
+          It runs without the Socket token in its environment.
+        required: false
+        type: string
+        default: ""
       extra-args:
         description: >
           Additional `socket scan create` flags, e.g. --dynamic-sbom-inference for Gradle/Maven repos, or
@@ -122,6 +131,14 @@ jobs:
             "https://npm.pkg.github.com":
               npmAuthToken: "${NPM_GITHUB_TOKEN}"
           EOF
+
+      # Passed through env rather than interpolated into the script, so the command is never re-parsed by the expression engine.
+      - name: Install project dependencies
+        if: inputs.setup-command != ''
+        env:
+          NPM_GITHUB_TOKEN: ${{ secrets.NPM_GITHUB_TOKEN }}
+          SETUP_COMMAND: ${{ inputs.setup-command }}
+        run: bash -euo pipefail -c "$SETUP_COMMAND"
 
       # Bump deliberately. The CLI publishes almost daily, so pick a release at least a week old,
       # matching the minimum package age we enforce elsewhere.
