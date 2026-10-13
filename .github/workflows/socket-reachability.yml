@@ -197,26 +197,41 @@ jobs:
           # A leftover facts file is picked up as pre-generated input and silently overrides fresh results.
           rm -f .socket.facts.json
 
-          # --default-branch tells Socket this branch is the repo's default. Passing it from any other
-          # branch would repoint the repo's alerts page at that branch.
-          default_branch_flag=()
-          if [[ "$IS_DEFAULT_BRANCH" == "true" ]]; then
-            default_branch_flag=(--default-branch)
-          else
+          # No --default-branch: Socket already knows each repo's default branch from the GitHub App, and the
+          # flag rewrites it. A scan of the default branch updates the alerts page without it.
+          if [[ "$IS_DEFAULT_BRANCH" != "true" ]]; then
             echo "::notice::Running on '${GITHUB_REF_NAME}', not the default branch: this scan will not update the alerts page."
           fi
 
-          # If the analysis fails, the CLI halts without creating a scan, so the repo keeps its previous results.
+          # The continue flags make any project that can't be installed, has no source to trace, or fails analysis
+          # (timeout, OOM, parse error) fall back to precomputed results, instead of discarding the whole scan.
+          # The fallbacks are surfaced as warnings below, so a degraded scan is still visible on the run.
+          # If the CLI fails outright, it creates no scan, so the repo keeps its previous results.
           # EXTRA_ARGS is intentionally unquoted so it can carry multiple flags.
+          set -o pipefail
+          scan_log="${RUNNER_TEMP}/socket-reachability.log"
           # shellcheck disable=SC2086
           socket scan create . \
             --reach \
             --org ynab \
             --repo "${GITHUB_REPOSITORY#*/}" \
             --branch "$GITHUB_REF_NAME" \
-            "${default_branch_flag[@]}" \
             --commit-hash "$GITHUB_SHA" \
             --reach-analysis-memory-limit "$MEMORY_LIMIT" \
             --reach-analysis-timeout "$ANALYSIS_TIMEOUT" \
+            --reach-continue-on-install-errors \
+            --reach-continue-on-no-source-files \
+            --reach-continue-on-analysis-errors \
             --no-interactive \
-            $EXTRA_ARGS
+            $EXTRA_ARGS 2>&1 | tee "$scan_log"
+
+          # Strip colour codes, then report every project that fell back: install failures, projects with no
+          # source files, and any summary-table row with a non-zero Error count (columns: Project | Vulns |
+          # Reach | Unreach | NoSup | NoReach | Skipped | Error | ...).
+          sed -E 's/\x1b\[[0-9;]*m//g' "$scan_log" > "${scan_log}.plain"
+          {
+            grep -E ': failed to install |contains no source files' "${scan_log}.plain" | sed -E 's/^.* - [a-z]+: *//'
+            awk -F'│' 'NF >= 9 && $8 ~ /^ *[1-9][0-9]* *$/ { gsub(/^ +| +$/, "", $1); gsub(/ /, "", $8); print $1 ": " $8 " analysis error(s), fell back to precomputed results" }' "${scan_log}.plain"
+          } | sort -u | while IFS= read -r line; do
+            echo "::warning title=Socket reachability fallback::${line}"
+          done
