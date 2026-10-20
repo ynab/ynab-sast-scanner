@@ -1,0 +1,237 @@
+name: Socket Full Application Reachability
+
+# Runs Socket's full application reachability analysis (https://docs.socket.dev/docs/full-application-reachability)
+# and uploads the result as a full scan. On the caller's default branch, that scan replaces the precomputed
+# reachability verdicts on the alerts page.
+#
+# This is deliberately separate from socket-basics.yml: Basics is a PR-only SAST scan, and its own reachability
+# option never reaches the alerts dashboard. This one runs on merged code, needs the caller's language toolchains
+# (the analysis installs dependencies), and needs far more memory than the Basics runner has.
+#
+# Callers should trigger it on pushes to their default branch AND on a weekly schedule: Socket replaces a full
+# application result older than 7 days with the next GitHub App scan, so a quiet repo would otherwise silently
+# fall back to precomputed reachability.
+#
+# Runs on other branches are allowed, for testing: they create a scan tagged with that branch, which never
+# updates the alerts page.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node version to install for npm/yarn/pnpm projects. Leave empty to skip.
+        required: false
+        type: string
+        default: ""
+      python-version:
+        description: Python version (3.11+) to install, along with uv, for Python projects. Leave empty to skip.
+        required: false
+        type: string
+        default: ""
+      ruby-version:
+        description: Ruby version to install for RubyGems projects. Leave empty to skip.
+        required: false
+        type: string
+        default: ""
+      java-version:
+        description: >
+          Temurin JDK version to install for Gradle/Maven projects. Leave empty to skip. Pair it with
+          --dynamic-sbom-inference in extra-args so the build tool resolves the dependency tree.
+        required: false
+        type: string
+        default: ""
+      runner:
+        description: >
+          Runner label. The default has 32 GB of RAM, which Socket recommends for npm, Python and Ruby.
+          Very large npm repos may need blacksmith-16vcpu-ubuntu-2404 (64 GB) with a higher memory-limit.
+        required: false
+        type: string
+        default: blacksmith-8vcpu-ubuntu-2404
+      memory-limit:
+        description: --reach-analysis-memory-limit. Keep it below the runner's RAM to leave room for the OS and installs.
+        required: false
+        type: string
+        default: 24GB
+      timeout:
+        description: --reach-analysis-timeout. Socket's npm P90 is 10m and P99 is 40m.
+        required: false
+        type: string
+        default: 20m
+      job-timeout-minutes:
+        description: Overall job timeout. Must comfortably exceed `timeout`, which covers the analysis only.
+        required: false
+        type: number
+        default: 45
+      setup-command:
+        description: >
+          Optional shell command run from the repo root before the scan, e.g. `yarn install --immutable` plus any
+          build step that workspace packages need. Use it when the analysis can't install a project on its own,
+          typically workspace packages that only resolve after the whole monorepo is installed (and built).
+          It runs without the Socket token in its environment.
+        required: false
+        type: string
+        default: ""
+      extra-args:
+        description: >
+          Additional `socket scan create` flags, e.g. --dynamic-sbom-inference for Gradle/Maven repos, or
+          --reach-ecosystems npm to limit the analysis to one ecosystem.
+        required: false
+        type: string
+        default: ""
+    secrets:
+      SOCKET_SECURITY_API_KEY:
+        description: Socket API token (the same org secret Socket Basics uses). Needs the full-scans:create scope.
+        required: true
+      NPM_GITHUB_TOKEN:
+        description: >
+          Only for repos that install @ynab/* packages from GitHub Packages (npm), or resolve slik from its
+          GitHub Packages Maven registry (Gradle). The analysis installs dependencies, so it needs the same
+          registry access as the repo's own CI.
+        required: false
+
+# One scan per repo and branch at a time, and never cancel an in-progress one: on a busy repo a long analysis
+# could otherwise be cancelled forever and never land. GitHub keeps only the newest pending run, so the latest
+# commit is always the next one scanned.
+concurrency:
+  group: socket-reachability-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  reachability:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.job-timeout-minutes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node
+        if: inputs.node-version != ''
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      # Puts the repo's pinned yarn/pnpm (from package.json's packageManager field) on PATH,
+      # since the analysis installs dependencies with the project's own package manager.
+      - name: Enable corepack
+        if: inputs.node-version != ''
+        run: corepack enable
+
+      - name: Set up Python
+        if: inputs.python-version != ''
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      # The analysis requires uv 0.6.8+ for Python projects.
+      - name: Set up uv
+        if: inputs.python-version != ''
+        uses: astral-sh/setup-uv@6b9c6063abd6010835644d4c2e1bef4cf5cd0fca # v6
+
+      - name: Set up Ruby
+        if: inputs.ruby-version != ''
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: ${{ inputs.ruby-version }}
+
+      - name: Set up Java
+        if: inputs.java-version != ''
+        uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5.4.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+
+      # Both files reference the token by variable rather than embedding it, so it only exists in the
+      # environment of the scan step below.
+      - name: Configure GitHub Packages auth
+        env:
+          HAS_NPM_GITHUB_TOKEN: ${{ secrets.NPM_GITHUB_TOKEN != '' }}
+        if: env.HAS_NPM_GITHUB_TOKEN == 'true'
+        run: |
+          # Single quotes are deliberate: npm and yarn expand ${NPM_GITHUB_TOKEN} themselves at install time.
+          # shellcheck disable=SC2016
+          echo '//npm.pkg.github.com/:_authToken=${NPM_GITHUB_TOKEN}' >> ~/.npmrc
+          cat >> ~/.yarnrc.yml <<'EOF'
+          npmRegistries:
+            "https://npm.pkg.github.com":
+              npmAuthToken: "${NPM_GITHUB_TOKEN}"
+          EOF
+
+      # Passed through env rather than interpolated into the script, so the command is never re-parsed by the expression engine.
+      - name: Install project dependencies
+        if: inputs.setup-command != ''
+        env:
+          NPM_GITHUB_TOKEN: ${{ secrets.NPM_GITHUB_TOKEN }}
+          # Gradle reads ORG_GRADLE_PROJECT_<name> as project property <name>. ynab_android resolves slik with
+          # ynabGitHubPackagesUser/Token; slik's own build requires ynabGithubUser/Token to configure publishing.
+          ORG_GRADLE_PROJECT_ynabGitHubPackagesUser: ${{ github.actor }}
+          ORG_GRADLE_PROJECT_ynabGitHubPackagesToken: ${{ secrets.NPM_GITHUB_TOKEN }}
+          ORG_GRADLE_PROJECT_ynabGithubUser: ${{ github.actor }}
+          ORG_GRADLE_PROJECT_ynabGithubToken: ${{ secrets.NPM_GITHUB_TOKEN }}
+          SETUP_COMMAND: ${{ inputs.setup-command }}
+        run: bash -euo pipefail -c "$SETUP_COMMAND"
+
+      # Bump deliberately. The CLI publishes almost daily, so pick a release at least a week old,
+      # matching the minimum package age we enforce elsewhere.
+      - name: Install Socket CLI
+        run: npm install --global --ignore-scripts socket@1.4.1
+
+      - name: Run reachability analysis and create scan
+        env:
+          # The Socket CLI reads its token from SOCKET_CLI_API_TOKEN.
+          SOCKET_CLI_API_TOKEN: ${{ secrets.SOCKET_SECURITY_API_KEY }}
+          NPM_GITHUB_TOKEN: ${{ secrets.NPM_GITHUB_TOKEN }}
+          # Gradle reads ORG_GRADLE_PROJECT_<name> as project property <name>. ynab_android resolves slik with
+          # ynabGitHubPackagesUser/Token; slik's own build requires ynabGithubUser/Token to configure publishing.
+          ORG_GRADLE_PROJECT_ynabGitHubPackagesUser: ${{ github.actor }}
+          ORG_GRADLE_PROJECT_ynabGitHubPackagesToken: ${{ secrets.NPM_GITHUB_TOKEN }}
+          ORG_GRADLE_PROJECT_ynabGithubUser: ${{ github.actor }}
+          ORG_GRADLE_PROJECT_ynabGithubToken: ${{ secrets.NPM_GITHUB_TOKEN }}
+          # Scheduled runs always use the default branch, and their payload carries no repository object.
+          IS_DEFAULT_BRANCH: ${{ github.event_name == 'schedule' || github.ref_name == github.event.repository.default_branch }}
+          MEMORY_LIMIT: ${{ inputs.memory-limit }}
+          ANALYSIS_TIMEOUT: ${{ inputs.timeout }}
+          EXTRA_ARGS: ${{ inputs.extra-args }}
+        run: |
+          # A leftover facts file is picked up as pre-generated input and silently overrides fresh results.
+          rm -f .socket.facts.json
+
+          # No --default-branch: Socket already knows each repo's default branch from the GitHub App, and the
+          # flag rewrites it. A scan of the default branch updates the alerts page without it.
+          if [[ "$IS_DEFAULT_BRANCH" != "true" ]]; then
+            echo "::notice::Running on '${GITHUB_REF_NAME}', not the default branch: this scan will not update the alerts page."
+          fi
+
+          # The continue flags make any project that can't be installed, has no source to trace, or fails analysis
+          # (timeout, OOM, parse error) fall back to precomputed results, instead of discarding the whole scan.
+          # The fallbacks are surfaced as warnings below, so a degraded scan is still visible on the run.
+          # If the CLI fails outright, it creates no scan, so the repo keeps its previous results.
+          # EXTRA_ARGS is intentionally unquoted so it can carry multiple flags.
+          set -o pipefail
+          scan_log="${RUNNER_TEMP}/socket-reachability.log"
+          # shellcheck disable=SC2086
+          socket scan create . \
+            --reach \
+            --org ynab \
+            --repo "${GITHUB_REPOSITORY#*/}" \
+            --branch "$GITHUB_REF_NAME" \
+            --commit-hash "$GITHUB_SHA" \
+            --reach-analysis-memory-limit "$MEMORY_LIMIT" \
+            --reach-analysis-timeout "$ANALYSIS_TIMEOUT" \
+            --reach-continue-on-install-errors \
+            --reach-continue-on-no-source-files \
+            --reach-continue-on-analysis-errors \
+            --no-interactive \
+            $EXTRA_ARGS 2>&1 | tee "$scan_log"
+
+          # Strip colour codes, then report every project that fell back: install failures, projects with no
+          # source files, and any summary-table row with a non-zero Error count (columns: Project | Vulns |
+          # Reach | Unreach | NoSup | NoReach | Skipped | Error | ...).
+          sed -E 's/\x1b\[[0-9;]*m//g' "$scan_log" > "${scan_log}.plain"
+          {
+            grep -E ': failed to install |contains no source files' "${scan_log}.plain" | sed -E 's/^.* - [a-z]+: *//'
+            awk -F'│' 'NF >= 9 && $8 ~ /^ *[1-9][0-9]* *$/ { gsub(/^ +| +$/, "", $1); gsub(/ /, "", $8); print $1 ": " $8 " analysis error(s), fell back to precomputed results" }' "${scan_log}.plain"
+          } | sort -u | while IFS= read -r line; do
+            echo "::warning title=Socket reachability fallback::${line}"
+          done
