@@ -175,7 +175,7 @@ jobs:
       # Bump deliberately. The CLI publishes almost daily, so pick a release at least a week old,
       # matching the minimum package age we enforce elsewhere.
       - name: Install Socket CLI
-        run: npm install --global --ignore-scripts socket@1.4.1
+        run: npm install --global --ignore-scripts socket@1.8.2
 
       - name: Run reachability analysis and create scan
         env:
