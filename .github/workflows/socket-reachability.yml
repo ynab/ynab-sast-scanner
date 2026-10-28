@@ -53,7 +53,9 @@ on:
         type: string
         default: 24GB
       timeout:
-        description: --reach-analysis-timeout. Socket's npm P90 is 10m and P99 is 40m.
+        description: >
+          --reach-analysis-timeout, applied to each workspace, so a repo with many projects can need a higher
+          job-timeout-minutes too. Socket's npm P90 is 10m and P99 is 40m.
         required: false
         type: string
         default: 20m
@@ -105,6 +107,8 @@ jobs:
     timeout-minutes: ${{ inputs.job-timeout-minutes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Node
         if: inputs.node-version != ''
@@ -127,7 +131,7 @@ jobs:
       # The analysis requires uv 0.6.8+ for Python projects.
       - name: Set up uv
         if: inputs.python-version != ''
-        uses: astral-sh/setup-uv@6b9c6063abd6010835644d4c2e1bef4cf5cd0fca # v6
+        uses: astral-sh/setup-uv@6b9c6063abd6010835644d4c2e1bef4cf5cd0fca # v6.0.1
 
       - name: Set up Ruby
         if: inputs.ruby-version != ''
