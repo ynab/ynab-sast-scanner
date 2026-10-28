@@ -78,8 +78,8 @@ jobs:
 
       - name: Run Socket Basics
         env:
-          # Bump this digest when upgrading socket-basics. Currently v3.4.0 - https://github.com/SocketDev/socket-basics/pkgs/container/socket-basics.
-          SOCKET_BASICS_IMAGE: ghcr.io/socketdev/socket-basics@sha256:e9f14df9ddadf78969960eb17e61630632f09c465c9559ecb5464b6bd6786833
+          # Bump this digest when upgrading socket-basics. Currently v3.4.1 - https://github.com/SocketDev/socket-basics/pkgs/container/socket-basics.
+          SOCKET_BASICS_IMAGE: ghcr.io/socketdev/socket-basics@sha256:eb37a13ad88c35a641b34dc523c40bb39f32a3091364f18ee88e891e900973bb
           GITHUB_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_SECURITY_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
