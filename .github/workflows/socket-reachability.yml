@@ -230,7 +230,7 @@ jobs:
           # Reach | Unreach | NoSup | NoReach | Skipped | Error | ...).
           sed -E 's/\x1b\[[0-9;]*m//g' "$scan_log" > "${scan_log}.plain"
           {
-            grep -E ': failed to install |contains no source files' "${scan_log}.plain" | sed -E 's/^.* - [a-z]+: *//'
+            grep -E ': failed to install |contains no source files' "${scan_log}.plain" | sed -E 's/^.* - [a-z]+: *//' || true
             awk -F'│' 'NF >= 9 && $8 ~ /^ *[1-9][0-9]* *$/ { gsub(/^ +| +$/, "", $1); gsub(/ /, "", $8); print $1 ": " $8 " analysis error(s), fell back to precomputed results" }' "${scan_log}.plain"
           } | sort -u | while IFS= read -r line; do
             echo "::warning title=Socket reachability fallback::${line}"
