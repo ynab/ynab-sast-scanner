@@ -8,9 +8,10 @@ name: Socket Full Application Reachability
 # option never reaches the alerts dashboard. This one runs on merged code, needs the caller's language toolchains
 # (the analysis installs dependencies), and needs far more memory than the Basics runner has.
 #
-# Callers should trigger it on pushes to their default branch AND on a weekly schedule: Socket replaces a full
-# application result older than 7 days with the next GitHub App scan, so a quiet repo would otherwise silently
-# fall back to precomputed reachability.
+# Callers should trigger it on pushes to their default branch AND on a schedule at least twice a week: Socket
+# replaces a full application result older than 7 days with the next GitHub App scan, so a quiet repo would
+# otherwise silently fall back to precomputed reachability. A weekly run sits right at that cutoff, so the App
+# scan can still get there first.
 #
 # Runs on other branches are allowed, for testing: they create a scan tagged with that branch, which never
 # updates the alerts page.
@@ -69,7 +70,9 @@ on:
           Optional shell command run from the repo root before the scan, e.g. `yarn install --immutable` plus any
           build step that workspace packages need. Use it when the analysis can't install a project on its own,
           typically workspace packages that only resolve after the whole monorepo is installed (and built).
-          It runs without the Socket token in its environment.
+          It runs without the Socket token in its environment, but that does not isolate the token: the analysis
+          in the scan step installs dependencies itself, so third-party install scripts still run with the Socket
+          token and NPM_GITHUB_TOKEN in their environment.
         required: false
         type: string
         default: ""
@@ -82,7 +85,9 @@ on:
         default: ""
     secrets:
       SOCKET_SECURITY_API_KEY:
-        description: Socket API token (the same org secret Socket Basics uses). Needs the full-scans:create scope.
+        description: >
+          Socket API token (the same org secret Socket Basics uses). Needs the full-scans:create and packages:list
+          scopes, and should carry no others: dependency install scripts in the scan step can read it.
         required: true
       NPM_GITHUB_TOKEN:
         description: >
@@ -183,7 +188,9 @@ jobs:
 
       - name: Run reachability analysis and create scan
         env:
-          # The Socket CLI reads its token from SOCKET_CLI_API_TOKEN.
+          # The Socket CLI reads its token from SOCKET_CLI_API_TOKEN. The analysis installs dependencies inside this
+          # step, so their install scripts see this token and NPM_GITHUB_TOKEN. There's no way around that, which
+          # is why the token's scopes are kept to the minimum.
           SOCKET_CLI_API_TOKEN: ${{ secrets.SOCKET_SECURITY_API_KEY }}
           NPM_GITHUB_TOKEN: ${{ secrets.NPM_GITHUB_TOKEN }}
           # Gradle reads ORG_GRADLE_PROJECT_<name> as project property <name>. ynab_android resolves slik with
